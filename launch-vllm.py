@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import os
-#os.environ["TRANSFORMERS_CACHE"] = '/cache'
+os.environ["TRANSFORMERS_CACHE"] = '/mnt/local_storage/'
 
 #assert 'CUDA_VISIBLE_DEVICES' in os.environ, "Set CUDA_VISIBLE_DEVICES, else this will take memory on each (and load model to 0)"
 
