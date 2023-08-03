@@ -199,7 +199,9 @@ class LlamaAttentionWithLora(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        qkv += hidden_states @ self.qkv_lora_a @ self.qkv_lora_b
+        num_requests = hidden_states.shape[0]
+        for i range(num_requests):
+            qkv[i] += hidden_states[i] @ self.qkv_lora_a @ self.qkv_lora_b
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
