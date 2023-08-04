@@ -182,13 +182,19 @@ class LlamaAttentionWithLora(nn.Module):
                                            num_kv_heads=self.num_kv_heads)
 
         # TODO: update lora
-        self.lora_rank = 4
-        self.qkv_lora_a = torch.randn(self.hidden_size, self.lora_rank).to(torch.cuda.current_device())
-        self.qkv_lora_b = torch.zeros(self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
-            self.head_dim // tp_size).to(torch.cuda.current_device())
+        self.num_loras = 4
+        self.lora_rank = 8
+        self.qkv_lora_a = torch.randn(32, self.hidden_size, self.lora_rank).to(torch.cuda.current_device())
+        self.qkv_lora_b = torch.randn(32, self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
+            self.head_dim // tp_size).to(torch.cuda.current_device()) / 10000
         self.o_lora_a = torch.randn(self.total_num_heads * self.head_dim // tp_size, self.lora_rank).to(torch.cuda.current_device())
-        self.o_lora_b = torch.zeros(self.lora_rank, self.hidden_size).to(torch.cuda.current_device())
+        self.o_lora_b = torch.randn(self.lora_rank, self.hidden_size).to(torch.cuda.current_device()) / 10000
+        self.streams = [torch.cuda.Stream(priority=-1) for _ in range(32)]
 
+    def split(self, num_requests):
+        num_splits = min(num_requests, self.num_loras)
+        splits = list(range(0, num_requests, num_requests//num_splits)) 
+        return splits
 
     def forward(
         self,
@@ -199,9 +205,10 @@ class LlamaAttentionWithLora(nn.Module):
         cache_event: Optional[torch.cuda.Event],
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        num_requests = hidden_states.shape[0]
-        for i range(num_requests):
-            qkv[i] += hidden_states[i] @ self.qkv_lora_a @ self.qkv_lora_b
+        splits = self.split(hidden_states.shape[0])
+        for i in range(len(splits) - 1):
+            qkv[splits[i]:splits[i+1]] += hidden_states[splits[i]:splits[i+1]] @ self.qkv_lora_a[i] @ self.qkv_lora_b[i]
+        # qkv += hidden_states @ self.qkv_lora_a @ self.qkv_lora_b
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         k_cache, v_cache = kv_cache
         attn_output = self.attn(positions, q, k, v, k_cache, v_cache,
