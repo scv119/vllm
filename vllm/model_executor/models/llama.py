@@ -182,7 +182,7 @@ class LlamaAttentionWithLora(nn.Module):
                                            num_kv_heads=self.num_kv_heads)
 
         # TODO: update lora
-        self.num_loras = 4
+        self.num_loras = 32
         self.lora_rank = 8
         self.qkv_lora_a = torch.randn(32, self.hidden_size, self.lora_rank).to(torch.cuda.current_device())
         self.qkv_lora_b = torch.randn(32, self.lora_rank, (self.total_num_heads + 2 * self.total_num_kv_heads) *
