@@ -9,7 +9,10 @@ import triton
 import triton.language as tl
 
 from vllm._C import ops
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (
+    ReplicatedLinear,
+    RowParallelLinear,
+    ColumnParallelLinear)
 
 from vllm.model_executor.parallel_utils.parallel_state import (
     get_tensor_model_parallel_rank)
@@ -17,6 +20,29 @@ from vllm.model_executor.parallel_utils.communication_op import (
     tensor_model_parallel_all_reduce)
 from vllm.model_executor.utils import set_weight_attrs
 
+
+class MoEMLP(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+    ) -> None:
+        super().__init__()
+        self.ffn_dim = intermediate_size
+        self.hidden_dim = hidden_size
+
+        self.w1 = ColumnParallelLinear(self.hidden_dim,
+                                   self.ffn_dim,
+                                   bias=False)
+        self.w2 = RowParallelLinear(self.ffn_dim,
+                                   self.hidden_dim,
+                                   bias=False)
+        self.w3 = ColumnParallelLinear(self.hidden_dim,
+                                   self.ffn_dim,
+                                   bias=False)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert False, "Not implemented yet"
 
 class MoE(nn.Module):
 
@@ -39,19 +65,15 @@ class MoE(nn.Module):
                                      bias=False,
                                      linear_method=None)
 
-        self.w1s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.hidden_size,
-                        self.intermediate_size))
-        self.w2s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.intermediate_size,
-                        self.hidden_size))
-        self.w3s = nn.Parameter(
-            torch.rand(self.num_total_experts, self.hidden_size,
-                        self.intermediate_size))
+        self.experts = nn.ModuleList([
+            MoEMLP(self.hidden_size,
+                   self.intermediate_size)
+            for _ in range(self.num_total_experts)
+        ])
 
-        set_weight_attrs(self.w1s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
-        set_weight_attrs(self.w2s, {"weight_loader": self.weight_loader, "parallel_dim": 0})
-        set_weight_attrs(self.w3s, {"weight_loader": self.weight_loader, "parallel_dim": 1})
+        self.expert_w1s = [expert.w1.weight.T() for expert in self.experts]
+        self.expert_w2s = [expert.w2.weight.T() for expert in self.experts]
+        self.expert_w3s = [expert.w3.weight.T() for expert in self.experts]
 
     def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, expert_id: int):
         tp_rank = get_tensor_model_parallel_rank()
@@ -80,11 +102,10 @@ class MoE(nn.Module):
         expanded_hidden_states, experts_range, expanded_weights, experts_indices = \
             self.expand_and_permutate_hidden_states(
                 hidden_states, selected_experts, routing_weights)
+        print(f"{expanded_weights=} {experts_range=} {experts_indices=} {selected_experts=} {routing_weights=}") 
 
         expanded_hidden_states = self.grouped_mlp(expanded_hidden_states,
-                                                  experts_range, self.w1s.data,
-                                                  self.w2s.data, self.w3s.data)
-
+                                                  experts_range)
         expanded_hidden_states.mul_(expanded_weights.unsqueeze(-1))
 
         tensor_model_parallel_all_reduce(expanded_hidden_states)
@@ -119,16 +140,13 @@ class MoE(nn.Module):
         expanded_hidden_states: torch.
         Tensor,  # [batch_size * top_k_experts, hidden_size]
         cum_experts_range: torch.Tensor,  # [num_experts + 1]
-        w1s: torch.Tensor,  # [num_experts, hidden_size, ffn_dim]
-        w2s: torch.Tensor,  # [num_experts, ffn_dim, hidden_size]
-        w3s: torch.Tensor,  # [num_experts, hidden_size, ffn_dim]
     ) -> torch.Tensor:  # [batch_size * top_k_experts, hidden_size]
         grouped_w1_out = grouped_matmul(expanded_hidden_states,
-                                        cum_experts_range, w1s, "silu")
+                                        cum_experts_range, self.expert_w1s, "silu")
         grouped_w3_out = grouped_matmul(expanded_hidden_states,
-                                        cum_experts_range, w3s)
+                                        cum_experts_range, self.expert_w3s)
         grouped_w1_out.mul_(grouped_w3_out)
-        return grouped_matmul(grouped_w1_out, cum_experts_range, w2s)
+        return grouped_matmul(grouped_w1_out, cum_experts_range, self.expert_w2s)
 
     def merge_expert_outputs(
             self,
